@@ -11,6 +11,9 @@ static const char* TAG = "EspNow";
 #define LOG_E(fmt, ...) Serial.printf("[EspNow ERR] " fmt "\n", ##__VA_ARGS__)
 #endif
 
+// Out-of-class definition required for C++14 (GCC 8.4 / Arduino ESP32)
+constexpr uint8_t EspNow::BROADCAST_MAC[ESP_NOW_ETH_ALEN];
+
 // ── Singleton ──────────────────────────────────────────────
 
 EspNow& EspNow::instance() {
