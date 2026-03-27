@@ -1,0 +1,12 @@
+version: "1.0.0"
+description: "Portable ESP-NOW C++ wrapper with chunked transfer, password authentication, and dual ESP-IDF/Arduino support"
+url: "https://github.com/yarncode/EspNow"
+dependencies:
+  idf:
+    version: ">=5.0.0"
+targets:
+  - esp32
+  - esp32s2
+  - esp32s3
+  - esp32c3
+  - esp32c6
