@@ -367,7 +367,12 @@ void EspNow::cleanupStaleReassembly() {
 
 // ── Static ESP-NOW callbacks ──────────────────────────────
 
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 1, 0)
 void EspNow::onRecvStatic(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
+    const uint8_t* srcMac = info->src_addr;
+#else
+void EspNow::onRecvStatic(const uint8_t* srcMac, const uint8_t* data, int len) {
+#endif
     auto& self = instance();
 
     // Password validation
@@ -386,7 +391,7 @@ void EspNow::onRecvStatic(const esp_now_recv_info_t* info, const uint8_t* data, 
     if (!self.recvQueue_) return;
 
     RecvEvent evt = {};
-    memcpy(evt.mac, info->src_addr, ESP_NOW_ETH_ALEN);
+    memcpy(evt.mac, srcMac, ESP_NOW_ETH_ALEN);
     int copyLen = (payloadLen > ESP_NOW_MAX_DATA_LEN) ? ESP_NOW_MAX_DATA_LEN : payloadLen;
     memcpy(evt.data, payload, copyLen);
     evt.len = copyLen;
@@ -395,7 +400,7 @@ void EspNow::onRecvStatic(const esp_now_recv_info_t* info, const uint8_t* data, 
         LOG_W("Receive queue full, dropping packet");
     }
 #else
-    self.handleIncoming(info->src_addr, payload, payloadLen);
+    self.handleIncoming(srcMac, payload, payloadLen);
 #endif
 }
 

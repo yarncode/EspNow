@@ -12,7 +12,9 @@
     #include <WiFi.h>
     #include <esp_now.h>
     #include <esp_wifi.h>
-    #include <esp_mac.h>
+    #if __has_include(<esp_mac.h>)
+        #include <esp_mac.h>
+    #endif
 #else
     #include "esp_now.h"
     #include "esp_wifi.h"
@@ -212,6 +214,11 @@ private:
     static void recvTaskFunc(void* arg);
 #endif
 
+    // ESP-IDF v5.1+ uses esp_now_recv_info_t; older IDF / Arduino uses (const uint8_t* mac)
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 1, 0)
     static void onRecvStatic(const esp_now_recv_info_t* info, const uint8_t* data, int len);
+#else
+    static void onRecvStatic(const uint8_t* mac, const uint8_t* data, int len);
+#endif
     static void onSendStatic(const uint8_t* mac, esp_now_send_status_t status);
 };
