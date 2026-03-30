@@ -1,4 +1,6 @@
 #include "EspNow.h"
+#include <nvs.h>
+#include <nvs_flash.h>
 
 #ifndef ARDUINO
 static const char* TAG = "EspNow";
@@ -13,6 +15,102 @@ static const char* TAG = "EspNow";
 
 // Out-of-class definition required for C++14 (GCC 8.4 / Arduino ESP32)
 constexpr uint8_t EspNow::BROADCAST_MAC[ESP_NOW_ETH_ALEN];
+
+static void savePeerToNVS(const uint8_t* mac) {
+    nvs_handle_t handle;
+    if (nvs_open("espnow", NVS_READWRITE, &handle) == ESP_OK) {
+        size_t required_size = 0;
+        nvs_get_blob(handle, "peers", NULL, &required_size);
+        
+        uint8_t* peers = nullptr;
+        bool exists = false;
+        
+        if (required_size > 0) {
+            peers = (uint8_t*)malloc(required_size + ESP_NOW_ETH_ALEN);
+            if (peers && nvs_get_blob(handle, "peers", peers, &required_size) == ESP_OK) {
+                int count = required_size / ESP_NOW_ETH_ALEN;
+                for (int i = 0; i < count; i++) {
+                    if (memcmp(peers + (i * ESP_NOW_ETH_ALEN), mac, ESP_NOW_ETH_ALEN) == 0) {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists) {
+                    memcpy(peers + required_size, mac, ESP_NOW_ETH_ALEN);
+                    required_size += ESP_NOW_ETH_ALEN;
+                }
+            }
+        } else {
+            peers = (uint8_t*)malloc(ESP_NOW_ETH_ALEN);
+            if (peers) {
+                memcpy(peers, mac, ESP_NOW_ETH_ALEN);
+                required_size = ESP_NOW_ETH_ALEN;
+            }
+        }
+        
+        if (!exists && peers) {
+            nvs_set_blob(handle, "peers", peers, required_size);
+            nvs_commit(handle);
+        }
+        
+        if (peers) free(peers);
+        nvs_close(handle);
+    }
+}
+
+static void loadPeersFromNVS(std::function<void(const uint8_t*)> addPeerCb) {
+    nvs_handle_t handle;
+    if (nvs_open("espnow", NVS_READONLY, &handle) == ESP_OK) {
+        size_t required_size = 0;
+        if (nvs_get_blob(handle, "peers", NULL, &required_size) == ESP_OK && required_size > 0) {
+            uint8_t* peers = (uint8_t*)malloc(required_size);
+            if (peers && nvs_get_blob(handle, "peers", peers, &required_size) == ESP_OK) {
+                int count = required_size / ESP_NOW_ETH_ALEN;
+                for (int i = 0; i < count; i++) {
+                    addPeerCb(peers + (i * ESP_NOW_ETH_ALEN));
+                }
+            }
+            if (peers) free(peers);
+        }
+        nvs_close(handle);
+    }
+}
+
+static void removePeerFromNVS(const uint8_t* mac) {
+    nvs_handle_t handle;
+    if (nvs_open("espnow", NVS_READWRITE, &handle) == ESP_OK) {
+        size_t required_size = 0;
+        if (nvs_get_blob(handle, "peers", NULL, &required_size) == ESP_OK && required_size > 0) {
+            uint8_t* peers = (uint8_t*)malloc(required_size);
+            if (peers && nvs_get_blob(handle, "peers", peers, &required_size) == ESP_OK) {
+                int count = required_size / ESP_NOW_ETH_ALEN;
+                int new_count = 0;
+                uint8_t* new_peers = (uint8_t*)malloc(required_size);
+                
+                if (new_peers) {
+                    for (int i = 0; i < count; i++) {
+                        if (memcmp(peers + (i * ESP_NOW_ETH_ALEN), mac, ESP_NOW_ETH_ALEN) != 0) {
+                            memcpy(new_peers + (new_count * ESP_NOW_ETH_ALEN), peers + (i * ESP_NOW_ETH_ALEN), ESP_NOW_ETH_ALEN);
+                            new_count++;
+                        }
+                    }
+                    
+                    if (new_count < count) {
+                        if (new_count == 0) {
+                            nvs_erase_key(handle, "peers");
+                        } else {
+                            nvs_set_blob(handle, "peers", new_peers, new_count * ESP_NOW_ETH_ALEN);
+                        }
+                        nvs_commit(handle);
+                    }
+                    free(new_peers);
+                }
+            }
+            if (peers) free(peers);
+        }
+        nvs_close(handle);
+    }
+}
 
 // ── Singleton ──────────────────────────────────────────────
 
@@ -97,10 +195,24 @@ esp_err_t EspNow::init(uint8_t channel) {
     }
 #endif
 
+    initialized_ = true;
+    LOG_I("===== ESP-NOW Wrapper Initialization =====");
+    LOG_I("Device MAC   : %s", getMyMac().c_str());
+    LOG_I("WiFi Channel : %d", channel);
+
     addPeer(BROADCAST_MAC, channel);
 
-    initialized_ = true;
-    LOG_I("Initialized — MAC: %s  CH: %d", getMyMac().c_str(), channel);
+    LOG_I("Loading paired devices from NVS...");
+    int loadedCount = 0;
+    loadPeersFromNVS([this, channel, &loadedCount](const uint8_t* mac) {
+        if (addPeer(mac, channel, false) == ESP_OK) { // load and add, skip broadcast which already added
+            loadedCount++;
+        }
+    });
+
+    LOG_I("Total paired devices loaded: %d", loadedCount);
+    LOG_I("==========================================");
+
     return ESP_OK;
 }
 
@@ -140,7 +252,11 @@ esp_err_t EspNow::addPeer(const uint8_t* mac, uint8_t channel, bool encrypt) {
 
     esp_err_t ret = esp_now_add_peer(&peer);
     if (ret == ESP_OK) {
-        LOG_I("Added peer: %s", macToString(mac).c_str());
+        LOG_I("Added peer successfully: %s", macToString(mac).c_str());
+        // Do not save broadcast mac to NVS
+        if (memcmp(mac, BROADCAST_MAC, ESP_NOW_ETH_ALEN) != 0) {
+            savePeerToNVS(mac);
+        }
     } else {
         LOG_E("Add peer failed: %s (0x%x)", macToString(mac).c_str(), ret);
     }
@@ -149,7 +265,14 @@ esp_err_t EspNow::addPeer(const uint8_t* mac, uint8_t channel, bool encrypt) {
 
 esp_err_t EspNow::removePeer(const uint8_t* mac) {
     if (!initialized_) return ESP_ERR_INVALID_STATE;
-    return esp_now_del_peer(mac);
+    esp_err_t ret = esp_now_del_peer(mac);
+    if (ret == ESP_OK) {
+        LOG_I("Removed peer successfully: %s", macToString(mac).c_str());
+        removePeerFromNVS(mac);
+    } else {
+        LOG_E("Failed to remove peer: %s (0x%x)", macToString(mac).c_str(), ret);
+    }
+    return ret;
 }
 
 bool EspNow::autoPair(uint32_t timeoutMs) {
@@ -163,7 +286,7 @@ bool EspNow::autoPair(uint32_t timeoutMs) {
     const char* reqPayload = "ESP_AP_REQ";
     const char* ackPayload = "ESP_AP_ACK";
 
-    LOG_I("Starting auto-pair, timeout: %u ms", timeoutMs);
+    LOG_I("Starting auto-pair, timeout: %u ms", (unsigned int)timeoutMs);
 
     bool paired = false;
     uint32_t startMs = xTaskGetTickCount() * portTICK_PERIOD_MS;
@@ -194,6 +317,7 @@ bool EspNow::autoPair(uint32_t timeoutMs) {
                 if (err == ESP_OK) {
                     LOG_I("Successfully auto-paired with %s", macToString(autoPairPeer_).c_str());
                     paired = true;
+                    savePeerToNVS(autoPairPeer_);
                 }
                 break;
             }
