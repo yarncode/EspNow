@@ -95,6 +95,14 @@ public:
     esp_err_t removePeer(const uint8_t* mac);
 
     /**
+     * @brief Auto-pair with another device calling autoPair() at the same time.
+     *        It broadcasts a pairing request and waits for a response.
+     * @param timeoutMs Timeout in milliseconds (default 5000)
+     * @return true if successfully paired, false otherwise
+     */
+    bool autoPair(uint32_t timeoutMs = 5000);
+
+    /**
      * @brief Set password for message authentication.
      *        Both sides must match. Empty string to disable.
      */
@@ -144,6 +152,9 @@ private:
     bool initialized_ = false;
     bool wifiManaged_ = false;
     bool hasPassword_ = false;
+    bool isAutoPairing_ = false;
+    uint32_t autoPairStart_ = 0;
+    uint8_t autoPairPeer_[ESP_NOW_ETH_ALEN] = {};
     uint8_t channel_ = 1;
     uint8_t nextMsgId_ = 0;
     uint8_t passwordToken_[TOKEN_SIZE] = {};

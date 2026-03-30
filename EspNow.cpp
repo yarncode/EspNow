@@ -148,7 +148,64 @@ esp_err_t EspNow::addPeer(const uint8_t* mac, uint8_t channel, bool encrypt) {
 }
 
 esp_err_t EspNow::removePeer(const uint8_t* mac) {
+    if (!initialized_) return ESP_ERR_INVALID_STATE;
     return esp_now_del_peer(mac);
+}
+
+bool EspNow::autoPair(uint32_t timeoutMs) {
+    if (!initialized_) return false;
+
+    // Reset state for new auto-pair attempt
+    memset(autoPairPeer_, 0, ESP_NOW_ETH_ALEN);
+    isAutoPairing_ = true;
+    autoPairStart_ = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
+    const char* reqPayload = "ESP_AP_REQ";
+    const char* ackPayload = "ESP_AP_ACK";
+
+    LOG_I("Starting auto-pair, timeout: %u ms", timeoutMs);
+
+    bool paired = false;
+    uint32_t startMs = xTaskGetTickCount() * portTICK_PERIOD_MS;
+
+    while ((xTaskGetTickCount() * portTICK_PERIOD_MS) - startMs < timeoutMs) {
+        // Broadcast the request
+        broadcast((const uint8_t*)reqPayload, 10);
+        
+        // Wait and check if we received one
+        for (int i = 0; i < 5; i++) {
+            vTaskDelay(pdMS_TO_TICKS(100)); // 500ms delay between broadcasts
+
+            // Check if peer is found
+            bool peerFound = false;
+            for (int j = 0; j < 6; ++j) {
+                if (autoPairPeer_[j] != 0) {
+                    peerFound = true;
+                    break;
+                }
+            }
+
+            if (peerFound) {
+                // Found a peer! Send an ACK directly back just in case they are still waiting
+                send(autoPairPeer_, (const uint8_t*)ackPayload, 10);
+                
+                // Also add as peer
+                esp_err_t err = addPeer(autoPairPeer_, channel_, false); // Or inherit encrypt mode based on class members
+                if (err == ESP_OK) {
+                    LOG_I("Successfully auto-paired with %s", macToString(autoPairPeer_).c_str());
+                    paired = true;
+                }
+                break;
+            }
+        }
+        
+        if (paired) {
+            break;
+        }
+    }
+
+    isAutoPairing_ = false;
+    return paired;
 }
 
 // ── Send (single packet) ──────────────────────────────────
@@ -271,6 +328,25 @@ void EspNow::onSendComplete(SendCallback cb) { sendCb_ = std::move(cb); }
 // ── Incoming data handler (reassembly) ─────────────────────
 
 void EspNow::handleIncoming(const uint8_t* mac, const uint8_t* data, int len) {
+    if (isAutoPairing_ && len == 10 && memcmp(data, "ESP_AP_REQ", 10) == 0) {
+        // Only accept if not from ourselves (ESP-NOW usually doesn't reflect, but safe check)
+        uint8_t myMac[6];
+        getMyMacRaw(myMac);
+        if (memcmp(mac, myMac, 6) != 0) {
+            memcpy(autoPairPeer_, mac, 6);
+            return;
+        }
+    }
+
+    if (isAutoPairing_ && len == 10 && memcmp(data, "ESP_AP_ACK", 10) == 0) {
+        uint8_t myMac[6];
+        getMyMacRaw(myMac);
+        if (memcmp(mac, myMac, 6) != 0) {
+            memcpy(autoPairPeer_, mac, 6);
+            return;
+        }
+    }
+
     // Chunk detection: first byte must be CHUNK_MAGIC
     bool isChunked = (len >= (int)CHUNK_HEADER_SIZE && data[0] == CHUNK_MAGIC && data[3] >= 2 && data[2] < data[3]);
 
