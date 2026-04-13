@@ -196,9 +196,11 @@ esp_err_t EspNow::init(uint8_t channel) {
 #endif
 
     initialized_ = true;
-    LOG_I("===== ESP-NOW Wrapper Initialization =====");
-    LOG_I("Device MAC   : %s", getMyMac().c_str());
-    LOG_I("WiFi Channel : %d", channel);
+    LOG_I("==========================================");
+    LOG_I("   ESP-NOW Wrapper Initialized Successfully ");
+    LOG_I("   => DEVICE MAC: %s", getMyMac().c_str());
+    LOG_I("   => Please copy this MAC for peers to pair");
+    LOG_I("   => WiFi Channel : %d", channel);
 
     addPeer(BROADCAST_MAC, channel);
 
