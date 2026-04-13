@@ -11,24 +11,29 @@
 /**
  * @brief High-level event-driven communication layer on top of EspNow.
  *
- * Provides:
- *   - Named event registration & emission
- *   - Property advertising, publishing & observation
- *   - Smart control commands with TLV encoding
- *   - Method chaining for fluent API
+ * All data exchanged between devices uses TLV (Type-Length-Value) binary encoding.
+ * No manual byte manipulation needed — use DataMap to read and MessageBuilder to write.
  *
  * Usage (Sensor Node):
  *   auto& node = EspNowNode::instance();
  *   node.begin(1)
- *       .on("bdk_1", [](auto mac, auto data, int len) { })
- *       .handle("pump", [](auto mac, auto& ctrl) { ctrl.getInt("speed", 0); })
+ *       .on("bdk_1", [](auto mac, auto& data) {
+ *           int val = data.getInt("value");
+ *           bool state = data.getBool("state");
+ *       })
+ *       .handle("pump", [](auto mac, auto& ctrl) {
+ *           ctrl.getBool("on"); ctrl.getInt("speed");
+ *       })
  *       .advertise("temperature");
- *   node.publish("temperature", &temp, sizeof(temp));
+ *
+ *   node.publish("temperature").set("value", 25.5f).set("unit", "C").send();
  *
  * Usage (Controller Node):
  *   node.begin(1);
- *   node.emit(sensorMac, "bdk_1", &val, 1);
- *   node.observe(sensorMac, "temperature", [](auto data, int len) { });
+ *   node.emit(sensorMac, "bdk_1").set("value", 1).set("state", true).send();
+ *   node.observe(sensorMac, "temperature", [](auto& data) {
+ *       float t = data.getFloat("value");
+ *   });
  *   node.control(sensorMac, "pump").set("on", true).set("speed", 100).send();
  */
 class EspNowNode {
@@ -47,26 +52,21 @@ public:
     static constexpr uint8_t VAL_STRING = 0x04;
     static constexpr uint8_t VAL_RAW    = 0x05;
 
-    // ── Callback Types ─────────────────────────────────────
+    // ════════════════════════════════════════════════════════
+    // DataMap — TLV parser for incoming typed data
+    // ════════════════════════════════════════════════════════
 
-    /// Event callback: (sender_mac, payload_data, payload_len)
-    using EventCallback = std::function<void(const uint8_t* mac, const uint8_t* data, int len)>;
-
-    /// Property observer callback: (payload_data, payload_len)
-    using ObserveCallback = std::function<void(const uint8_t* data, int len)>;
-
-    // ── ControlData — TLV parser for incoming control commands ──
-
-    class ControlData {
+    class DataMap {
     public:
-        ControlData(const uint8_t* data, int len);
+        DataMap() = default;
+        DataMap(const uint8_t* data, int len);
 
-        bool     getBool(const std::string& key, bool defaultVal = false) const;
-        int32_t  getInt(const std::string& key, int32_t defaultVal = 0) const;
-        float    getFloat(const std::string& key, float defaultVal = 0.0f) const;
+        bool        getBool(const std::string& key, bool defaultVal = false) const;
+        int32_t     getInt(const std::string& key, int32_t defaultVal = 0) const;
+        float       getFloat(const std::string& key, float defaultVal = 0.0f) const;
         std::string getString(const std::string& key, const std::string& defaultVal = "") const;
-        bool     getRaw(const std::string& key, const uint8_t*& outData, int& outLen) const;
-        bool     hasKey(const std::string& key) const;
+        bool        getRaw(const std::string& key, const uint8_t*& outData, int& outLen) const;
+        bool        hasKey(const std::string& key) const;
 
     private:
         struct TLVEntry {
@@ -77,31 +77,48 @@ public:
         void parse(const uint8_t* data, int len);
     };
 
-    /// Control handler callback: (sender_mac, parsed_control_data)
-    using ControlCallback = std::function<void(const uint8_t* mac, ControlData& ctrl)>;
+    // ── Callback Types ─────────────────────────────────────
 
-    // ── ControlBuilder — Method chaining builder for outgoing control ──
+    /// Event & Control callback: (sender_mac, parsed data)
+    using EventCallback = std::function<void(const uint8_t* mac, DataMap& data)>;
 
-    class ControlBuilder {
+    /// Property observer callback: (parsed data)
+    using ObserveCallback = std::function<void(DataMap& data)>;
+
+    // ════════════════════════════════════════════════════════
+    // MessageBuilder — Method chaining for emit/publish/control
+    // ════════════════════════════════════════════════════════
+
+    class MessageBuilder {
     public:
-        ControlBuilder(EspNowNode& node, const uint8_t* mac, const std::string& name);
+        enum class Mode { EMIT, PUBLISH, CONTROL };
 
-        ControlBuilder& set(const std::string& key, bool value);
-        ControlBuilder& set(const std::string& key, int32_t value);
-        ControlBuilder& set(const std::string& key, float value);
-        ControlBuilder& set(const std::string& key, const std::string& value);
-        ControlBuilder& set(const std::string& key, const uint8_t* data, int len);
+        /// For emit/control (single target)
+        MessageBuilder(EspNowNode& node, const uint8_t* mac,
+                       const std::string& name, uint8_t frameType);
 
-        /// Build TLV payload and send CONTROL frame
+        /// For publish (send to all subscribers of a property)
+        MessageBuilder(EspNowNode& node, const std::string& name);
+
+        MessageBuilder& set(const std::string& key, bool value);
+        MessageBuilder& set(const std::string& key, int32_t value);
+        MessageBuilder& set(const std::string& key, float value);
+        MessageBuilder& set(const std::string& key, const std::string& value);
+        MessageBuilder& set(const std::string& key, const uint8_t* data, int len);
+
+        /// Build TLV payload, construct frame, and send
         esp_err_t send();
 
     private:
         EspNowNode& node_;
         uint8_t mac_[ESP_NOW_ETH_ALEN];
         std::string name_;
+        uint8_t frameType_;
+        bool isPublish_ = false;
         std::vector<uint8_t> payload_;
 
-        void appendTLV(const std::string& key, uint8_t valType, const uint8_t* valData, uint16_t valLen);
+        void appendTLV(const std::string& key, uint8_t valType,
+                       const uint8_t* valData, uint16_t valLen);
     };
 
     // ── Singleton ──────────────────────────────────────────
@@ -113,58 +130,47 @@ public:
 
     // ── Init ───────────────────────────────────────────────
 
-    /**
-     * @brief Initialize EspNow and register internal frame handler.
-     * @param channel WiFi channel (1-13)
-     * @return Reference to self for method chaining
-     */
     EspNowNode& begin(uint8_t channel = 1);
 
     // ── Event Registration (method chaining) ───────────────
 
     /**
-     * @brief Register a named event handler. Other devices can emit() to this event.
-     * @param name Event name (e.g. "bdk_1")
-     * @param cb   Callback invoked when event is received
+     * @brief Register a named event handler.
+     *        Other devices trigger this via emit(mac, name).set(...).send()
      */
     EspNowNode& on(const std::string& name, EventCallback cb);
 
     /**
-     * @brief Register a control command handler with TLV parsing.
-     * @param name  Control name (e.g. "pump")
-     * @param cb    Callback with parsed ControlData
+     * @brief Register a control command handler.
+     *        Other devices trigger this via control(mac, name).set(...).send()
      */
-    EspNowNode& handle(const std::string& name, ControlCallback cb);
+    EspNowNode& handle(const std::string& name, EventCallback cb);
 
     // ── Property Advertisement & Publishing ────────────────
 
     /**
-     * @brief Declare a property that this node can publish.
-     *        Remote devices can observe() this property.
+     * @brief Declare a property this node can publish.
      */
     EspNowNode& advertise(const std::string& name);
 
     /**
-     * @brief Publish property data to all subscribers.
-     * @param name Property name (must be advertised first)
-     * @param data Raw data bytes
-     * @param len  Data length
+     * @brief Start building a publish message (method chaining).
+     *        Data will be sent to all subscribers when .send() is called.
+     * @return MessageBuilder for chaining .set("key", value).send()
      */
-    esp_err_t publish(const std::string& name, const void* data, size_t len);
+    MessageBuilder publish(const std::string& name);
 
     // ── Remote Operations ──────────────────────────────────
 
     /**
-     * @brief Send an event to a specific device (triggers its .on() handler).
+     * @brief Start building an event message to a specific device.
+     * @return MessageBuilder for chaining .set("key", value).send()
      */
-    esp_err_t emit(const uint8_t* mac, const std::string& name,
-                   const uint8_t* data = nullptr, size_t len = 0);
+    MessageBuilder emit(const uint8_t* mac, const std::string& name);
 
     /**
      * @brief Subscribe to observe a property on a remote device.
-     * @param mac  Remote device MAC
-     * @param name Property name
-     * @param cb   Callback invoked when property data is received
+     *        Callback receives parsed DataMap with typed values.
      */
     EspNowNode& observe(const uint8_t* mac, const std::string& name, ObserveCallback cb);
 
@@ -175,9 +181,13 @@ public:
 
     /**
      * @brief Start building a control command (method chaining).
-     * @return ControlBuilder for chaining .set("key", value).send()
+     * @return MessageBuilder for chaining .set("key", value).send()
      */
-    ControlBuilder control(const uint8_t* mac, const std::string& name);
+    MessageBuilder control(const uint8_t* mac, const std::string& name);
+
+    // ── Internal: used by MessageBuilder for publish ───────
+    esp_err_t publishFrame(const std::string& name, const std::vector<uint8_t>& frame,
+                           const uint8_t* tlvPayload, size_t tlvLen);
 
 private:
     EspNowNode() = default;
@@ -188,12 +198,11 @@ private:
     std::map<std::string, EventCallback> eventHandlers_;
 
     // ── Control handlers (name -> callback) ────────────────
-    std::map<std::string, ControlCallback> controlHandlers_;
+    std::map<std::string, EventCallback> controlHandlers_;
 
     // ── Advertised properties ──────────────────────────────
     struct PropertyInfo {
-        std::vector<uint8_t> lastValue;
-        // List of subscriber MACs
+        std::vector<uint8_t> lastTLV;  // Last TLV payload (for new subscribers)
         struct Subscriber {
             uint8_t mac[ESP_NOW_ETH_ALEN];
         };
@@ -214,20 +223,8 @@ private:
     std::map<ObserverKey, ObserveCallback> observers_;
 
     // ── Frame building & parsing ───────────────────────────
-
-    /**
-     * @brief Build a frame: [type][nameLen][name][payload]
-     */
     static std::vector<uint8_t> buildFrame(uint8_t type, const std::string& name,
                                             const uint8_t* payload = nullptr, size_t payloadLen = 0);
-
-    /**
-     * @brief Send a pre-built frame via EspNow.
-     */
     esp_err_t sendFrame(const uint8_t* mac, const std::vector<uint8_t>& frame);
-
-    /**
-     * @brief Internal receive handler registered with EspNow.
-     */
     void handleFrame(const uint8_t* mac, const uint8_t* data, int len);
 };
